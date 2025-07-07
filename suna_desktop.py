@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+THIS SHOULD BE A LINTER ERROR#!/usr/bin/env python3
 """
 Suna Desktop Application
 A self-hosting desktop app for Suna AI Agent with GUI and web interface.
@@ -17,7 +17,7 @@ import webbrowser
 from pathlib import Path
 import signal
 import psutil
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import requests
 import queue
 from datetime import datetime
