@@ -1,4 +1,4 @@
-THIS SHOULD BE A LINTER ERROR#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Suna Desktop Application
 A self-hosting desktop app for Suna AI Agent with GUI and web interface.
@@ -32,7 +32,7 @@ class SunaService:
         self.web_port = 3000
         self.api_port = 8000
         
-    def check_requirements(self) -> tuple[bool, str]:
+    def check_requirements(self) -> Tuple[bool, str]:
         """Check if all requirements are met to run Suna."""
         # Check if Docker is available
         try:
@@ -57,7 +57,7 @@ class SunaService:
         
         return True, "All requirements met"
     
-    def setup_environment(self) -> tuple[bool, str]:
+    def setup_environment(self) -> Tuple[bool, str]:
         """Set up the environment files if they don't exist."""
         try:
             # Check if backend .env exists
@@ -101,7 +101,7 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
         except Exception as e:
             return False, f"Failed to setup environment: {str(e)}"
     
-    def start_services(self) -> tuple[bool, str]:
+    def start_services(self) -> Tuple[bool, str]:
         """Start all Suna services using Docker Compose."""
         if self.is_running:
             return False, "Services are already running"
@@ -129,7 +129,7 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
         except Exception as e:
             return False, f"Error starting services: {str(e)}"
     
-    def stop_services(self) -> tuple[bool, str]:
+    def stop_services(self) -> Tuple[bool, str]:
         """Stop all Suna services."""
         if not self.is_running:
             return False, "Services are not running"
@@ -378,8 +378,21 @@ class SunaDesktopGUI:
     
     def create_chat_tab(self):
         """Create the integrated chat tab."""
-        from suna_chat import SunaChatInterface
-        self.chat_interface = SunaChatInterface(self.chat_frame)
+        try:
+            from suna_chat import SunaChatInterface
+            self.chat_interface = SunaChatInterface(self.chat_frame)
+        except ImportError:
+            # Create a placeholder if suna_chat module is not available
+            placeholder_frame = ttk.Frame(self.chat_frame, padding="20")
+            placeholder_frame.pack(fill=tk.BOTH, expand=True)
+            ttk.Label(placeholder_frame, text="Chat interface will be available after setup completion.\nPlease ensure suna_chat.py is in the same directory.", 
+                     font=("TkDefaultFont", 12)).pack(expand=True)
+        except Exception as e:
+            # Create error message frame
+            error_frame = ttk.Frame(self.chat_frame, padding="20")
+            error_frame.pack(fill=tk.BOTH, expand=True)
+            ttk.Label(error_frame, text=f"Error loading chat interface: {str(e)}", 
+                     font=("TkDefaultFont", 12), foreground="red").pack(expand=True)
     
     def create_settings_tab(self):
         """Create the settings tab."""
