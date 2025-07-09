@@ -1,6 +1,7 @@
 import React, {createContext, useContext, useEffect, useState, ReactNode} from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {Alert} from 'react-native';
+import {Platform} from 'react-native';
 
 interface SunaConfig {
   serverUrl: string;
@@ -92,24 +93,52 @@ export const SunaProvider: React.FC<SunaProviderProps> = ({children}) => {
   };
 
   const getBaseUrl = () => {
-    return `http://${config.serverUrl}:${config.mobilePort}`;
+    // Input validation for URL construction
+    const cleanServerUrl = config.serverUrl.replace(/[^a-zA-Z0-9.-]/g, '');
+    const cleanPort = config.mobilePort.replace(/[^0-9]/g, '');
+    
+    if (!cleanServerUrl || !cleanPort) {
+      throw new Error('Invalid server configuration');
+    }
+    
+    return `http://${cleanServerUrl}:${cleanPort}`;
   };
 
   const checkConnection = async () => {
     try {
       setConnectionStatus('Connecting...');
       
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      
       const response = await fetch(`${getBaseUrl()}/api/health`, {
         method: 'GET',
-        timeout: 5000,
+        signal: controller.signal,
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
       });
+      
+      clearTimeout(timeoutId);
 
       if (response.ok) {
         setIsConnected(true);
         setConnectionStatus('Connected');
         
         // Check Suna backend status
-        const sunaResponse = await fetch(`${getBaseUrl()}/api/suna/health`);
+        const sunaController = new AbortController();
+        const sunaTimeoutId = setTimeout(() => sunaController.abort(), 5000);
+        
+        const sunaResponse = await fetch(`${getBaseUrl()}/api/suna/health`, {
+          signal: sunaController.signal,
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
+        });
+        
+        clearTimeout(sunaTimeoutId);
         const sunaData = await sunaResponse.json();
         
         if (sunaData.status === 'connected') {
@@ -123,18 +152,29 @@ export const SunaProvider: React.FC<SunaProviderProps> = ({children}) => {
     } catch (error) {
       setIsConnected(false);
       setConnectionStatus('Disconnected');
-      console.error('Connection check failed:', error);
+      if (error.name === 'AbortError') {
+        console.error('Connection check timed out');
+      } else {
+        console.error('Connection check failed:', error);
+      }
     }
   };
 
   const newChat = async () => {
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      
       const response = await fetch(`${getBaseUrl()}/api/chat/new`, {
         method: 'POST',
         headers: {
+          'Accept': 'application/json',
           'Content-Type': 'application/json',
         },
+        signal: controller.signal,
       });
+      
+      clearTimeout(timeoutId);
 
       if (response.ok) {
         const data = await response.json();
@@ -170,6 +210,17 @@ export const SunaProvider: React.FC<SunaProviderProps> = ({children}) => {
       Alert.alert('Error', 'Not connected to Suna Desktop');
       return;
     }
+    
+    // Input validation
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
+      Alert.alert('Error', 'Message cannot be empty');
+      return;
+    }
+    
+    if (message.length > 10000) {
+      Alert.alert('Error', 'Message too long (max 10,000 characters)');
+      return;
+    }
 
     if (!currentChatId) {
       await newChat();
@@ -180,16 +231,23 @@ export const SunaProvider: React.FC<SunaProviderProps> = ({children}) => {
     setIsLoading(true);
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      
       const response = await fetch(`${getBaseUrl()}/api/chat/${currentChatId}/send`, {
         method: 'POST',
         headers: {
+          'Accept': 'application/json',
           'Content-Type': 'application/json',
         },
+        signal: controller.signal,
         body: JSON.stringify({
-          message: message,
+          message: message.trim(),
           files: files || [],
         }),
       });
+      
+      clearTimeout(timeoutId);
 
       if (response.ok) {
         // Add loading message
@@ -198,11 +256,21 @@ export const SunaProvider: React.FC<SunaProviderProps> = ({children}) => {
         // Wait for response (simplified - in real app you'd want streaming)
         setTimeout(async () => {
           try {
-            const messagesResponse = await fetch(`${getBaseUrl()}/api/chat/${currentChatId}/messages`);
+            const msgController = new AbortController();
+            const msgTimeoutId = setTimeout(() => msgController.abort(), 10000);
+            
+            const messagesResponse = await fetch(`${getBaseUrl()}/api/chat/${currentChatId}/messages`, {
+              signal: msgController.signal,
+              headers: {
+                'Accept': 'application/json',
+              },
+            });
+            
+            clearTimeout(msgTimeoutId);
             const messagesData = await messagesResponse.json();
             
             // Remove loading message and add response
-            setMessages(prev => prev.filter(msg => msg.id !== loadingId));
+            setMessages(prev => prev.filter(msg => msg.id !== loadingId.toString()));
             
             const lastMessage = messagesData.messages?.[messagesData.messages.length - 1];
             if (lastMessage && lastMessage.role === 'assistant') {
@@ -211,19 +279,32 @@ export const SunaProvider: React.FC<SunaProviderProps> = ({children}) => {
               addMessage('assistant', 'Response received from Suna.');
             }
           } catch (error) {
-            addMessage('error', 'Failed to get response');
+            if (error.name === 'AbortError') {
+              addMessage('error', 'Response timed out');
+            } else {
+              addMessage('error', 'Failed to get response');
+            }
           }
           
           setIsLoading(false);
         }, 2000);
       } else {
-        const errorData = await response.json();
+        let errorData;
+        try {
+          errorData = await response.json();
+        } catch {
+          errorData = { error: 'Server error' };
+        }
         addMessage('error', errorData.error || 'Failed to send message');
         setIsLoading(false);
       }
     } catch (error) {
       console.error('Send message failed:', error);
-      addMessage('error', 'Failed to send message');
+      if (error.name === 'AbortError') {
+        addMessage('error', 'Request timed out');
+      } else {
+        addMessage('error', 'Failed to send message');
+      }
       setIsLoading(false);
     }
   };

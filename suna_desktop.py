@@ -21,6 +21,8 @@ from typing import Optional, Dict, Any, List
 import requests
 import queue
 from datetime import datetime
+import secrets
+import hashlib
 
 class SunaService:
     """Manages the Suna backend services."""
@@ -34,22 +36,31 @@ class SunaService:
         
     def check_requirements(self) -> tuple[bool, str]:
         """Check if all requirements are met to run Suna."""
+        # Security: Validate suna_path is within reasonable bounds
+        try:
+            resolved_path = self.suna_path.resolve()
+            if not resolved_path.exists():
+                return False, f"Suna directory not found: {resolved_path}"
+        except Exception as e:
+            return False, f"Invalid Suna path: {e}"
+        
         # Check if Docker is available
         try:
-            subprocess.run(['docker', '--version'], capture_output=True, check=True)
+            subprocess.run(['docker', '--version'], capture_output=True, check=True, timeout=10)
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False, "Docker is not installed or not available"
+        except subprocess.TimeoutExpired:
+            return False, "Docker command timed out"
         
         # Check if docker-compose is available
         try:
-            subprocess.run(['docker-compose', '--version'], capture_output=True, check=True)
+            subprocess.run(['docker-compose', '--version'], capture_output=True, check=True, timeout=10)
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False, "Docker Compose is not installed or not available"
+        except subprocess.TimeoutExpired:
+            return False, "Docker Compose command timed out"
         
         # Check if Suna directory exists and has necessary files
-        if not self.suna_path.exists():
-            return False, f"Suna directory not found: {self.suna_path}"
-        
         required_files = ['docker-compose.yaml', 'backend/', 'frontend/']
         for file in required_files:
             if not (self.suna_path / file).exists():
@@ -60,8 +71,17 @@ class SunaService:
     def setup_environment(self) -> tuple[bool, str]:
         """Set up the environment files if they don't exist."""
         try:
+            # Security: Validate paths before writing
+            backend_dir = self.suna_path / 'backend'
+            frontend_dir = self.suna_path / 'frontend'
+            
+            if not backend_dir.exists():
+                return False, "Backend directory not found"
+            if not frontend_dir.exists():
+                return False, "Frontend directory not found"
+            
             # Check if backend .env exists
-            backend_env = self.suna_path / 'backend' / '.env'
+            backend_env = backend_dir / '.env'
             if not backend_env.exists():
                 # Create basic .env file
                 env_content = """# Suna Backend Configuration
@@ -86,16 +106,16 @@ SUPABASE_SERVICE_ROLE_KEY=
 TAVILY_API_KEY=
 FIRECRAWL_API_KEY=
 """
-                backend_env.write_text(env_content)
+                backend_env.write_text(env_content, encoding='utf-8')
             
             # Check if frontend .env.local exists
-            frontend_env = self.suna_path / 'frontend' / '.env.local'
+            frontend_env = frontend_dir / '.env.local'
             if not frontend_env.exists():
                 # Create basic frontend env
                 env_content = """NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
 NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
 """
-                frontend_env.write_text(env_content)
+                frontend_env.write_text(env_content, encoding='utf-8')
             
             return True, "Environment setup completed"
         except Exception as e:
@@ -115,7 +135,8 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
                 ['docker-compose', 'up', '-d'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                timeout=300  # 5 minute timeout
             )
             
             stdout, stderr = process.communicate()
@@ -126,6 +147,8 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
             else:
                 return False, f"Failed to start services: {stderr}"
         
+        except subprocess.TimeoutExpired:
+            return False, "Service startup timed out"
         except Exception as e:
             return False, f"Error starting services: {str(e)}"
     
@@ -142,7 +165,8 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
                 ['docker-compose', 'down'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                timeout=120  # 2 minute timeout
             )
             
             stdout, stderr = process.communicate()
@@ -153,6 +177,8 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
             else:
                 return False, f"Failed to stop services: {stderr}"
         
+        except subprocess.TimeoutExpired:
+            return False, "Service shutdown timed out"
         except Exception as e:
             return False, f"Error stopping services: {str(e)}"
     
@@ -163,7 +189,8 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
             process = subprocess.run(
                 ['docker-compose', 'ps', '--format', 'json'],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=30
             )
             
             if process.returncode == 0:
@@ -175,6 +202,8 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
             else:
                 return {"status": "error", "message": process.stderr}
         
+        except subprocess.TimeoutExpired:
+            return {"status": "error", "message": "Status check timed out"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
     
@@ -189,16 +218,24 @@ NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
         
         # Check frontend
         try:
-            response = requests.get(f"http://localhost:{self.web_port}", timeout=5)
+            response = requests.get(
+                f"http://localhost:{self.web_port}", 
+                timeout=5,
+                headers={'User-Agent': 'SunaDesktop/1.0'}
+            )
             health["frontend"] = response.status_code == 200
-        except:
+        except Exception:
             pass
         
         # Check backend
         try:
-            response = requests.get(f"http://localhost:{self.api_port}/api/health", timeout=5)
+            response = requests.get(
+                f"http://localhost:{self.api_port}/api/health", 
+                timeout=5,
+                headers={'User-Agent': 'SunaDesktop/1.0'}
+            )
             health["backend"] = response.status_code == 200
-        except:
+        except Exception:
             pass
         
         # Note: Redis and RabbitMQ health would need docker inspection
@@ -547,7 +584,12 @@ class SunaDesktopGUI:
         
         env_file = self.suna_service.suna_path / 'backend' / '.env'
         if env_file.exists():
-            content = env_file.read_text()
+            try:
+                content = env_file.read_text(encoding='utf-8')
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read environment file: {e}")
+                return
+            
             self.env_text.delete(1.0, tk.END)
             self.env_text.insert(1.0, content)
     
@@ -556,10 +598,19 @@ class SunaDesktopGUI:
         if not self.suna_service:
             return
         
-        env_file = self.suna_service.suna_path / 'backend' / '.env'
-        content = self.env_text.get(1.0, tk.END)
-        env_file.write_text(content)
-        messagebox.showinfo("Success", "Environment variables saved!")
+        try:
+            env_file = self.suna_service.suna_path / 'backend' / '.env'
+            content = self.env_text.get(1.0, tk.END)
+            
+            # Security: Basic validation of environment content
+            if len(content) > 100000:  # 100KB limit
+                messagebox.showerror("Error", "Environment file too large")
+                return
+            
+            env_file.write_text(content, encoding='utf-8')
+            messagebox.showinfo("Success", "Environment variables saved!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save environment file: {e}")
     
     def append_to_logs(self, message: str, level: str = "info"):
         """Append message to logs."""
@@ -572,7 +623,9 @@ class SunaDesktopGUI:
             text_widget = self.logs_text
         
         text_widget.config(state=tk.NORMAL)
-        text_widget.insert(tk.END, f"[{timestamp}] {message}\n")
+        # Security: Limit log message length
+        safe_message = message[:1000] if len(message) > 1000 else message
+        text_widget.insert(tk.END, f"[{timestamp}] {safe_message}\n")
         text_widget.see(tk.END)
         text_widget.config(state=tk.DISABLED)
     

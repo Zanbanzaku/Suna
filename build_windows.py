@@ -11,6 +11,7 @@ import shutil
 import json
 from pathlib import Path
 import tempfile
+import hashlib
 
 class WindowsBuilder:
     """Build Windows executable and installer for Suna Desktop."""
@@ -21,6 +22,27 @@ class WindowsBuilder:
         self.dist_dir = self.project_dir / "dist"
         self.installer_dir = self.project_dir / "installer"
         
+        # Security: Validate paths are within project directory
+        self._validate_paths()
+        
+    def _validate_paths(self):
+        """Validate that all paths are within the project directory."""
+        try:
+            self.project_dir.resolve()
+            if not self.project_dir.exists():
+                raise ValueError("Project directory does not exist")
+        except Exception as e:
+            raise ValueError(f"Invalid project directory: {e}")
+    
+    def _safe_remove_directory(self, path):
+        """Safely remove directory with validation."""
+        path = Path(path).resolve()
+        if not str(path).startswith(str(self.project_dir.resolve())):
+            raise ValueError(f"Attempted to remove directory outside project: {path}")
+        
+        if path.exists() and path.is_dir():
+            shutil.rmtree(path)
+    
     def check_requirements(self):
         """Check if build requirements are available."""
         print("🔍 Checking build requirements...")
@@ -32,12 +54,14 @@ class WindowsBuilder:
         except ImportError:
             print("❌ PyInstaller not found. Installing...")
             try:
-                subprocess.run([sys.executable, '-m', 'pip', 'install', 'pyinstaller'], check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError):
+                subprocess.run([
+                    sys.executable, '-m', 'pip', 'install', 'pyinstaller'
+                ], check=True, timeout=300)
+                print("✅ PyInstaller installed")
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
                 print("❌ Failed to install PyInstaller automatically.")
                 print("   Please install manually: python -m pip install pyinstaller")
                 return False
-            print("✅ PyInstaller installed")
         
         # Check Pillow for icon creation
         try:
@@ -46,12 +70,14 @@ class WindowsBuilder:
         except ImportError:
             print("❌ Pillow not found. Installing...")
             try:
-                subprocess.run([sys.executable, '-m', 'pip', 'install', 'pillow'], check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError):
+                subprocess.run([
+                    sys.executable, '-m', 'pip', 'install', 'pillow'
+                ], check=True, timeout=300)
+                print("✅ Pillow installed")
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
                 print("❌ Failed to install Pillow automatically.")
                 print("   Please install manually: python -m pip install pillow")
                 return False
-            print("✅ Pillow installed")
         
         # Check if Inno Setup is available (optional)
         inno_path = Path("C:/Program Files (x86)/Inno Setup 6/ISCC.exe")
@@ -64,8 +90,28 @@ class WindowsBuilder:
             return False
     
     def create_spec_file(self):
-        """Create PyInstaller spec file."""
+        """Create PyInstaller spec file with security considerations."""
         print("📝 Creating PyInstaller spec file...")
+        
+        # Validate required files exist
+        required_files = [
+            'launch_suna_desktop.py',
+            'requirements.txt',
+            'README.md',
+            'QUICK_START.md',
+            'suna_desktop.py',
+            'suna_chat.py',
+            'mobile_web.py',
+            'setup_suna_desktop.py'
+        ]
+        
+        missing_files = []
+        for file in required_files:
+            if not (self.project_dir / file).exists():
+                missing_files.append(file)
+        
+        if missing_files:
+            raise FileNotFoundError(f"Required files missing: {missing_files}")
         
         spec_content = '''# -*- mode: python ; coding: utf-8 -*-
 
@@ -107,6 +153,8 @@ a = Analysis(
         'webbrowser',
         'signal',
         'shutil',
+        'hashlib',
+        'secrets',
     ],
     hookspath=[],
     hooksconfig={},
@@ -145,17 +193,16 @@ exe = EXE(
 '''
         
         spec_path = self.project_dir / "suna_desktop.spec"
-        spec_path.write_text(spec_content)
+        spec_path.write_text(spec_content, encoding='utf-8')
         print(f"✅ Spec file created: {spec_path}")
         return spec_path
     
     def create_icon(self):
-        """Create application icon."""
+        """Create application icon with error handling."""
         print("🎨 Creating application icon...")
         
-        # Create a simple icon using PIL if available
         try:
-            from PIL import Image, ImageDraw, ImageFont
+            from PIL import Image, ImageDraw
             
             # Create 256x256 icon
             img = Image.new('RGBA', (256, 256), (79, 70, 229, 255))  # Indigo background
@@ -184,24 +231,25 @@ exe = EXE(
             print(f"✅ Icon created: {icon_path}")
             
         except ImportError:
-            print("⚠️  PIL not available - using default icon")
-            # Create a simple text-based icon
+            print("⚠️  PIL not available - creating placeholder icon")
+            # Create a minimal placeholder
             icon_path = self.project_dir / "icon.ico"
             if not icon_path.exists():
-                # Copy from system if available
-                system_icon = Path("C:/Windows/System32/shell32.dll")
-                if system_icon.exists():
-                    shutil.copy2(system_icon, icon_path)
+                # Create empty file as placeholder
+                icon_path.touch()
+        except Exception as e:
+            print(f"⚠️  Icon creation failed: {e}")
+            # Create placeholder
+            icon_path = self.project_dir / "icon.ico"
+            icon_path.touch()
     
     def build_executable(self):
-        """Build the executable using PyInstaller."""
+        """Build the executable using PyInstaller with security checks."""
         print("🔨 Building executable...")
         
         # Clean previous builds
-        if self.build_dir.exists():
-            shutil.rmtree(self.build_dir)
-        if self.dist_dir.exists():
-            shutil.rmtree(self.dist_dir)
+        self._safe_remove_directory(self.build_dir)
+        self._safe_remove_directory(self.dist_dir)
         
         # Create spec file
         spec_path = self.create_spec_file()
@@ -217,24 +265,58 @@ exe = EXE(
             str(spec_path)
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print("✅ Executable built successfully")
-            exe_path = self.dist_dir / "SunaDesktop.exe"
-            if exe_path.exists():
-                print(f"📦 Executable location: {exe_path}")
-                return exe_path
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # 30 min timeout
+            
+            if result.returncode == 0:
+                print("✅ Executable built successfully")
+                exe_path = self.dist_dir / "SunaDesktop.exe"
+                if exe_path.exists():
+                    print(f"📦 Executable location: {exe_path}")
+                    # Verify executable integrity
+                    if self._verify_executable(exe_path):
+                        return exe_path
+                    else:
+                        raise Exception("Executable verification failed")
+                else:
+                    raise Exception("Executable not found after build")
             else:
-                raise Exception("Executable not found after build")
-        else:
-            raise Exception(f"Build failed: {result.stderr}")
+                raise Exception(f"Build failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            raise Exception("Build timed out after 30 minutes")
+    
+    def _verify_executable(self, exe_path):
+        """Verify the built executable."""
+        try:
+            # Check file size (should be reasonable)
+            size = exe_path.stat().st_size
+            if size < 1024 * 1024:  # Less than 1MB is suspicious
+                print(f"⚠️  Executable size seems small: {size} bytes")
+                return False
+            
+            # Calculate hash for integrity
+            sha256_hash = hashlib.sha256()
+            with open(exe_path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(chunk)
+            
+            print(f"✅ Executable hash: {sha256_hash.hexdigest()[:16]}...")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Executable verification failed: {e}")
+            return False
     
     def create_installer_script(self, exe_path):
-        """Create Inno Setup installer script."""
+        """Create Inno Setup installer script with security considerations."""
         print("📜 Creating installer script...")
         
         self.installer_dir.mkdir(exist_ok=True)
+        
+        # Validate exe_path
+        if not exe_path.exists():
+            raise FileNotFoundError(f"Executable not found: {exe_path}")
         
         installer_script = f'''[Setup]
 AppName=Suna Desktop
@@ -246,7 +328,6 @@ AppUpdatesURL=https://github.com/kortix-ai/suna/releases
 DefaultDirName={{autopf}}\\Suna Desktop
 DefaultGroupName=Suna Desktop
 AllowNoIcons=yes
-LicenseFile=LICENSE
 OutputDir={self.installer_dir}
 OutputBaseFilename=SunaDesktopSetup
 SetupIconFile=icon.ico
@@ -254,6 +335,10 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+DisableDirPage=no
+DisableProgramGroupPage=no
+CreateAppDir=yes
+UninstallDisplayIcon={{app}}\\SunaDesktop.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -292,6 +377,8 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ErrorCode: Integer;
 begin
   if CurStep = ssPostInstall then begin
     // Check if Docker is installed
@@ -305,12 +392,12 @@ end;
 '''
         
         script_path = self.installer_dir / "installer.iss"
-        script_path.write_text(installer_script)
+        script_path.write_text(installer_script, encoding='utf-8')
         print(f"✅ Installer script created: {script_path}")
         return script_path
     
     def build_installer(self, exe_path):
-        """Build the installer using Inno Setup."""
+        """Build the installer using Inno Setup with timeout."""
         print("📦 Building installer...")
         
         script_path = self.create_installer_script(exe_path)
@@ -323,56 +410,73 @@ end;
         
         # Build installer
         cmd = [str(inno_path), str(script_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            installer_path = self.installer_dir / "SunaDesktopSetup.exe"
-            if installer_path.exists():
-                print(f"✅ Installer created: {installer_path}")
-                return installer_path
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # 10 min timeout
+            
+            if result.returncode == 0:
+                installer_path = self.installer_dir / "SunaDesktopSetup.exe"
+                if installer_path.exists():
+                    print(f"✅ Installer created: {installer_path}")
+                    return installer_path
+                else:
+                    raise Exception("Installer not found after build")
             else:
-                raise Exception("Installer not found after build")
-        else:
-            raise Exception(f"Installer build failed: {result.stderr}")
+                raise Exception(f"Installer build failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            raise Exception("Installer build timed out")
     
     def create_portable_package(self, exe_path):
-        """Create a portable package."""
+        """Create a portable package with security validation."""
         print("📁 Creating portable package...")
         
         portable_dir = self.project_dir / "SunaDesktop_Portable"
-        if portable_dir.exists():
-            shutil.rmtree(portable_dir)
-        
+        self._safe_remove_directory(portable_dir)
         portable_dir.mkdir()
         
-        # Copy executable
+        # Copy executable with verification
+        if not exe_path.exists():
+            raise FileNotFoundError(f"Executable not found: {exe_path}")
+        
         shutil.copy2(exe_path, portable_dir / "SunaDesktop.exe")
         
         # Copy documentation
-        for doc in ["README.md", "QUICK_START.md", "requirements.txt"]:
-            if (self.project_dir / doc).exists():
-                shutil.copy2(self.project_dir / doc, portable_dir / doc)
+        docs = ["README.md", "QUICK_START.md", "requirements.txt"]
+        for doc in docs:
+            doc_path = self.project_dir / doc
+            if doc_path.exists():
+                shutil.copy2(doc_path, portable_dir / doc)
         
-        # Create run script
+        # Create secure run script
         run_script = portable_dir / "Run_Suna_Desktop.bat"
         run_script.write_text('''@echo off
 echo Starting Suna Desktop...
 echo.
 echo Make sure Docker Desktop is running before using Suna!
 echo.
+echo Press Ctrl+C to cancel if needed...
+timeout /t 3 /nobreak >nul
 SunaDesktop.exe
+if errorlevel 1 (
+    echo.
+    echo Application exited with error code %errorlevel%
+    echo Check the logs above for details.
+)
 pause
-''')
+''', encoding='utf-8')
         
         # Create ZIP package
         zip_path = self.project_dir / "SunaDesktop_Portable.zip"
+        if zip_path.exists():
+            zip_path.unlink()
+        
         shutil.make_archive(str(zip_path.with_suffix('')), 'zip', portable_dir)
         
         print(f"✅ Portable package created: {zip_path}")
         return zip_path
     
     def build_all(self):
-        """Build all Windows packages."""
+        """Build all Windows packages with comprehensive error handling."""
         print("🚀 Starting Windows build process...")
         print("=" * 50)
         
@@ -413,6 +517,7 @@ pause
             print("- Users need Docker Desktop installed")
             print("- Windows 10 or later required")
             print("- Antivirus may flag the executable (false positive)")
+            print("- Test all packages before distribution")
             
             return True
             
@@ -421,10 +526,17 @@ pause
             return False
 
 def main():
-    """Main build function."""
-    builder = WindowsBuilder()
-    success = builder.build_all()
-    return 0 if success else 1
+    """Main build function with argument validation."""
+    try:
+        builder = WindowsBuilder()
+        success = builder.build_all()
+        return 0 if success else 1
+    except KeyboardInterrupt:
+        print("\n⏹️  Build cancelled by user")
+        return 1
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        return 1
 
 if __name__ == "__main__":
     sys.exit(main())

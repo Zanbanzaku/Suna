@@ -12,13 +12,17 @@ import uuid
 from datetime import datetime
 import threading
 import time
+import re
+import secrets
+from urllib.parse import urlparse
 
 class SunaMobileWeb:
     """Mobile web interface for Suna."""
     
     def __init__(self, host='0.0.0.0', port=5000, suna_api_url='http://localhost:8000'):
         self.app = Flask(__name__)
-        self.app.secret_key = os.urandom(24)
+        # Security: Use cryptographically secure random key
+        self.app.secret_key = secrets.token_bytes(32)
         self.host = host
         self.port = port
         self.suna_api_url = suna_api_url
@@ -26,7 +30,68 @@ class SunaMobileWeb:
         # Active conversations
         self.conversations = {}
         
+        # Security: Input validation patterns
+        self.uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+        
         self.setup_routes()
+        
+    def _validate_uuid(self, uuid_string):
+        """Validate UUID format for security."""
+        if not isinstance(uuid_string, str):
+            return False
+        return bool(self.uuid_pattern.match(uuid_string.lower()))
+    
+    def _validate_message(self, message):
+        """Validate message content."""
+        if not isinstance(message, str):
+            return False, "Message must be a string"
+        
+        message = message.strip()
+        if not message:
+            return False, "Message cannot be empty"
+        
+        if len(message) > 10000:
+            return False, "Message too long (max 10,000 characters)"
+        
+        return True, message
+    
+    def _safe_request_to_suna(self, endpoint, method='GET', data=None, timeout=30):
+        """Make a safe request to Suna API with validation."""
+        try:
+            # Validate endpoint
+            if not endpoint.startswith('/'):
+                endpoint = '/' + endpoint
+            
+            url = self.suna_api_url + endpoint
+            parsed_url = urlparse(url)
+            
+            # Security: Ensure we're only making requests to the configured Suna API
+            if parsed_url.hostname not in ['localhost', '127.0.0.1']:
+                expected_host = urlparse(self.suna_api_url).hostname
+                if parsed_url.hostname != expected_host:
+                    raise ValueError("Invalid API endpoint")
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'User-Agent': 'SunaMobileWeb/1.0'
+            }
+            
+            if method.upper() == 'GET':
+                response = requests.get(url, headers=headers, timeout=timeout)
+            elif method.upper() == 'POST':
+                response = requests.post(url, headers=headers, json=data, timeout=timeout)
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+            
+            return response
+            
+        except requests.exceptions.Timeout:
+            raise Exception("Request to Suna API timed out")
+        except requests.exceptions.ConnectionError:
+            raise Exception("Could not connect to Suna API")
+        except Exception as e:
+            raise Exception(f"API request failed: {str(e)}")
     
     def setup_routes(self):
         """Set up Flask routes."""
@@ -45,12 +110,12 @@ class SunaMobileWeb:
         def suna_health():
             """Check Suna backend health."""
             try:
-                response = requests.get(f"{self.suna_api_url}/api/health", timeout=5)
+                response = self._safe_request_to_suna('/api/health', timeout=5)
                 return jsonify({
                     "status": "connected" if response.status_code == 200 else "disconnected",
                     "suna_response": response.json() if response.status_code == 200 else None
                 })
-            except:
+            except Exception as e:
                 return jsonify({"status": "disconnected", "suna_response": None})
         
         @self.app.route('/api/chat/new', methods=['POST'])
@@ -70,6 +135,10 @@ class SunaMobileWeb:
         @self.app.route('/api/chat/<chat_id>/messages')
         def get_messages(chat_id):
             """Get messages for a chat."""
+            # Security: Validate chat_id
+            if not self._validate_uuid(chat_id):
+                return jsonify({"error": "Invalid chat ID"}), 400
+            
             if chat_id in self.conversations:
                 return jsonify({"messages": self.conversations[chat_id]["messages"]})
             return jsonify({"error": "Chat not found"}), 404
@@ -77,14 +146,25 @@ class SunaMobileWeb:
         @self.app.route('/api/chat/<chat_id>/send', methods=['POST'])
         def send_message(chat_id):
             """Send a message in a chat."""
+            # Security: Validate chat_id
+            if not self._validate_uuid(chat_id):
+                return jsonify({"error": "Invalid chat ID"}), 400
+            
             if chat_id not in self.conversations:
                 return jsonify({"error": "Chat not found"}), 404
             
-            data = request.get_json()
-            message = data.get('message', '').strip()
+            try:
+                data = request.get_json()
+                if not data:
+                    return jsonify({"error": "No JSON data provided"}), 400
+            except Exception:
+                return jsonify({"error": "Invalid JSON data"}), 400
             
-            if not message:
-                return jsonify({"error": "Message cannot be empty"}), 400
+            # Validate message
+            raw_message = data.get('message', '')
+            is_valid, message = self._validate_message(raw_message)
+            if not is_valid:
+                return jsonify({"error": message}), 400
             
             # Add user message to conversation
             user_msg = {
@@ -132,8 +212,9 @@ class SunaMobileWeb:
         
         # If this is the first message, initiate agent
         if not conversation["thread_id"]:
-            response = requests.post(
-                f"{self.suna_api_url}/api/agent/initiate",
+            response = self._safe_request_to_suna(
+                '/api/agent/initiate',
+                method='POST',
                 data={
                     'prompt': message,
                     'model_name': 'claude-3-5-sonnet-20241022',
@@ -141,8 +222,7 @@ class SunaMobileWeb:
                     'reasoning_effort': 'low',
                     'stream': 'false',  # No streaming for mobile
                     'enable_context_manager': 'false'
-                },
-                timeout=30
+                }
             )
             
             if response.status_code == 200:
@@ -178,6 +258,10 @@ class SunaMobileWeb:
     
     def _wait_for_response(self, agent_run_id, timeout=60):
         """Wait for agent response (simplified for mobile)."""
+        # Security: Validate agent_run_id
+        if not self._validate_uuid(agent_run_id):
+            return "Invalid agent run ID"
+        
         # This is a simplified implementation
         # In a real application, you'd want to implement proper streaming or polling
         start_time = time.time()
@@ -185,7 +269,7 @@ class SunaMobileWeb:
         while time.time() - start_time < timeout:
             try:
                 # Check agent run status
-                response = requests.get(f"{self.suna_api_url}/api/agent-run/{agent_run_id}")
+                response = self._safe_request_to_suna(f'/api/agent-run/{agent_run_id}')
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("status") == "completed":
@@ -195,8 +279,9 @@ class SunaMobileWeb:
                         return f"Agent failed: {data.get('error', 'Unknown error')}"
                 
                 time.sleep(2)  # Poll every 2 seconds
-            except:
-                pass
+            except Exception as e:
+                print(f"Error checking agent status: {e}")
+                time.sleep(2)
         
         return "Response timeout"
     
@@ -606,7 +691,15 @@ class SunaMobileWeb:
         """Run the mobile web server."""
         self.create_templates()
         print(f"Starting Suna Mobile Web Interface on http://{self.host}:{self.port}")
-        self.app.run(host=self.host, port=self.port, debug=False)
+        
+        # Security: Disable debug mode in production
+        self.app.run(
+            host=self.host, 
+            port=self.port, 
+            debug=False,
+            threaded=True,
+            use_reloader=False
+        )
 
 def main():
     """Main function to run the mobile web interface."""

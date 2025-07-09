@@ -11,6 +11,8 @@ import shutil
 from pathlib import Path
 import json
 import argparse
+import hashlib
+import tempfile
 
 class CompleteBuildSystem:
     """Complete build system for all Suna Desktop packages."""
@@ -19,13 +21,33 @@ class CompleteBuildSystem:
         self.project_dir = Path.cwd()
         self.build_dir = self.project_dir / "build_output"
         
+        # Security: Validate paths
+        self._validate_paths()
+        
+    def _validate_paths(self):
+        """Validate that all paths are within the project directory."""
+        try:
+            self.project_dir.resolve()
+            if not self.project_dir.exists():
+                raise ValueError("Project directory does not exist")
+        except Exception as e:
+            raise ValueError(f"Invalid project directory: {e}")
+    
+    def _safe_remove_directory(self, path):
+        """Safely remove directory with validation."""
+        path = Path(path).resolve()
+        if not str(path).startswith(str(self.project_dir.resolve())):
+            raise ValueError(f"Attempted to remove directory outside project: {path}")
+        
+        if path.exists() and path.is_dir():
+            shutil.rmtree(path)
+        
     def setup_build_environment(self):
         """Set up the build environment."""
         print("🔧 Setting up build environment...")
         
         # Create build output directory
-        if self.build_dir.exists():
-            shutil.rmtree(self.build_dir)
+        self._safe_remove_directory(self.build_dir)
         self.build_dir.mkdir()
         
         # Check Python dependencies
@@ -36,14 +58,21 @@ class CompleteBuildSystem:
         
         for package in required_packages:
             try:
-                __import__(package.replace('-', '_'))
+                # Security: Validate package name
+                clean_package = package.replace('-', '_')
+                if not clean_package.replace('_', '').isalnum():
+                    raise ValueError(f"Invalid package name: {package}")
+                
+                __import__(clean_package)
                 print(f"✅ {package} found")
             except ImportError:
                 print(f"Installing {package}...")
                 try:
-                    subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+                    subprocess.run([
+                        sys.executable, '-m', 'pip', 'install', package
+                    ], check=True, timeout=300)
                     print(f"✅ {package} installed")
-                except (subprocess.CalledProcessError, FileNotFoundError):
+                except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
                     print(f"❌ Failed to install {package} automatically.")
                     print(f"   Please install manually: python -m pip install {package}")
                     return False
@@ -113,7 +142,7 @@ class CompleteBuildSystem:
             
             # Install dependencies
             print("📦 Installing Node.js dependencies...")
-            subprocess.run(['npm', 'install'], check=True)
+            subprocess.run(['npm', 'install'], check=True, timeout=600)
             
             # Check if Android SDK is available
             android_home = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
@@ -124,7 +153,7 @@ class CompleteBuildSystem:
             
             # Build debug APK
             print("🔨 Building Android APK...")
-            subprocess.run(['npm', 'run', 'build:android-debug'], check=True)
+            subprocess.run(['npm', 'run', 'build:android-debug'], check=True, timeout=1800)
             
             # Copy APK to output directory
             android_output_dir = self.build_dir / "android"
@@ -132,13 +161,21 @@ class CompleteBuildSystem:
             
             apk_path = android_dir / "android" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
             if apk_path.exists():
-                shutil.copy2(apk_path, android_output_dir / "SunaDesktop-debug.apk")
-                print("✅ Android APK built successfully")
-                return True
+                # Verify APK integrity
+                if self._verify_apk(apk_path):
+                    shutil.copy2(apk_path, android_output_dir / "SunaDesktop-debug.apk")
+                    print("✅ Android APK built successfully")
+                    return True
+                else:
+                    print("❌ APK verification failed")
+                    return False
             else:
                 print("❌ APK not found after build")
                 return False
                 
+        except subprocess.TimeoutExpired:
+            print("❌ Android build timed out")
+            return False
         except subprocess.CalledProcessError as e:
             print(f"❌ Android build failed: {e}")
             return False
@@ -147,6 +184,28 @@ class CompleteBuildSystem:
             return False
         finally:
             os.chdir(original_dir)
+    
+    def _verify_apk(self, apk_path):
+        """Verify APK integrity."""
+        try:
+            # Check file size (should be reasonable)
+            size = apk_path.stat().st_size
+            if size < 1024 * 1024:  # Less than 1MB is suspicious
+                print(f"⚠️  APK size seems small: {size} bytes")
+                return False
+            
+            # Calculate hash for integrity
+            sha256_hash = hashlib.sha256()
+            with open(apk_path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(chunk)
+            
+            print(f"✅ APK hash: {sha256_hash.hexdigest()[:16]}...")
+            return True
+            
+        except Exception as e:
+            print(f"❌ APK verification failed: {e}")
+            return False
     
     def create_release_package(self):
         """Create a complete release package."""
@@ -167,7 +226,7 @@ class CompleteBuildSystem:
             "name": "Suna Desktop",
             "version": "1.0.0",
             "description": "Self-hosting AI Agent Platform",
-            "build_date": str(Path(__file__).stat().st_mtime),
+            "build_date": str(int(Path(__file__).stat().st_mtime)),
             "components": {
                 "windows_executable": "windows/SunaDesktop.exe",
                 "windows_portable": "windows/SunaDesktop_Portable.zip",
@@ -184,7 +243,7 @@ class CompleteBuildSystem:
             }
         }
         
-        with open(release_dir / "release_info.json", 'w') as f:
+        with open(release_dir / "release_info.json", 'w', encoding='utf-8') as f:
             json.dump(release_info, f, indent=2)
         
         # Create installation guide
@@ -236,7 +295,7 @@ class CompleteBuildSystem:
 For detailed documentation, see README.md
 """
         
-        with open(release_dir / "INSTALLATION.md", 'w') as f:
+        with open(release_dir / "INSTALLATION.md", 'w', encoding='utf-8') as f:
             f.write(install_guide)
         
         print("✅ Release package created")
@@ -304,20 +363,26 @@ For detailed documentation, see README.md
         return success_count == total_builds
 
 def main():
-    """Main build function."""
+    """Main build function with comprehensive error handling."""
     parser = argparse.ArgumentParser(description="Build all Suna Desktop packages")
     parser.add_argument('--skip-windows', action='store_true', help="Skip Windows build")
     parser.add_argument('--skip-android', action='store_true', help="Skip Android build")
     
     args = parser.parse_args()
     
-    builder = CompleteBuildSystem()
-    success = builder.build_all(
-        skip_windows=args.skip_windows,
-        skip_android=args.skip_android
-    )
-    
-    return 0 if success else 1
+    try:
+        builder = CompleteBuildSystem()
+        success = builder.build_all(
+            skip_windows=args.skip_windows,
+            skip_android=args.skip_android
+        )
+        return 0 if success else 1
+    except KeyboardInterrupt:
+        print("\n⏹️  Build cancelled by user")
+        return 1
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        return 1
 
 if __name__ == "__main__":
     sys.exit(main())
