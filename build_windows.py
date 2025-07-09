@@ -31,8 +31,27 @@ class WindowsBuilder:
             print(f"✅ PyInstaller {PyInstaller.__version__} found")
         except ImportError:
             print("❌ PyInstaller not found. Installing...")
-            subprocess.run([sys.executable, '-m', 'pip', 'install', 'pyinstaller'], check=True)
+            try:
+                subprocess.run([sys.executable, '-m', 'pip', 'install', 'pyinstaller'], check=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                print("❌ Failed to install PyInstaller automatically.")
+                print("   Please install manually: python -m pip install pyinstaller")
+                return False
             print("✅ PyInstaller installed")
+        
+        # Check Pillow for icon creation
+        try:
+            import PIL
+            print("✅ Pillow found")
+        except ImportError:
+            print("❌ Pillow not found. Installing...")
+            try:
+                subprocess.run([sys.executable, '-m', 'pip', 'install', 'pillow'], check=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                print("❌ Failed to install Pillow automatically.")
+                print("   Please install manually: python -m pip install pillow")
+                return False
+            print("✅ Pillow installed")
         
         # Check if Inno Setup is available (optional)
         inno_path = Path("C:/Program Files (x86)/Inno Setup 6/ISCC.exe")

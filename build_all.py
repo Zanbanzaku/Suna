@@ -37,11 +37,19 @@ class CompleteBuildSystem:
         for package in required_packages:
             try:
                 __import__(package.replace('-', '_'))
+                print(f"✅ {package} found")
             except ImportError:
                 print(f"Installing {package}...")
-                subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+                try:
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+                    print(f"✅ {package} installed")
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    print(f"❌ Failed to install {package} automatically.")
+                    print(f"   Please install manually: python -m pip install {package}")
+                    return False
         
         print("✅ Build environment ready")
+        return True
     
     def build_windows_packages(self):
         """Build Windows executable and installer."""
@@ -242,7 +250,9 @@ For detailed documentation, see README.md
         total_builds = 2
         
         # Setup environment
-        self.setup_build_environment()
+        if not self.setup_build_environment():
+            print("❌ Failed to setup build environment")
+            return False
         
         # Build Windows packages
         if not skip_windows:
